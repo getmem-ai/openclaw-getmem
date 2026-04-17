@@ -1,6 +1,6 @@
 ---
 name: getmem
-description: 'Persistent memory for AI agents via getmem.ai. Automatically remembers users across sessions. Call mem.get() before each LLM call to inject context, and mem.ingest() after each turn to save the conversation.'
+description: 'Add persistent memory to your AI agent using getmem.ai. This skill teaches you how to use the getmem-ai SDK to remember users across sessions.'
 metadata:
   {
     "openclaw": {
@@ -10,7 +10,7 @@ metadata:
           "id": "pip-getmem",
           "kind": "pip",
           "package": "getmem-ai",
-          "label": "Install getmem-ai (pip)"
+          "label": "Install getmem-ai SDK"
         }
       ]
     }
@@ -19,53 +19,59 @@ metadata:
 
 # getmem.ai Memory Skill
 
-Persistent memory for your AI agent via [getmem.ai](https://getmem.ai).
+Add persistent memory to your AI agent. Users are remembered across sessions automatically.
 
-## Setup
+## What this skill does
 
-Set your API key in the environment:
+- Retrieves relevant memories before each LLM call
+- Saves conversations after each turn
+- Stores both user and assistant messages
+- Memory persists indefinitely — no expiry
+
+## Install the SDK
 
 ```bash
-export GETMEM_API_KEY=gm_live_...
+pip install getmem-ai
 ```
 
-Get your key at https://platform.getmem.ai
+## Get an API key
 
-## Usage
+Sign up at https://platform.getmem.ai and create an API key.
+
+## How to use
+
+Initialize the client with your API key:
 
 ```python
-import getmem_ai as getmem, os
+import getmem_ai as getmem
 
-mem = getmem.init(os.environ["GETMEM_API_KEY"])
+mem = getmem.init("your-api-key-here")
+```
 
-# Before each LLM call — get relevant memory context
+Before each LLM call, retrieve relevant memory context:
+
+```python
 result = mem.get(user_id, query=user_message)
-context = result["context"]  # inject into system prompt
+context = result["context"]
+# Add context to your system prompt
+```
 
-# After each turn — save both user + assistant messages
+After each turn, save the conversation:
+
+```python
 mem.ingest(user_id, messages=[
     {"role": "user", "content": user_message},
     {"role": "assistant", "content": reply},
 ])
 ```
 
-## How it works
-
-1. `mem.get()` fetches only the relevant memories for the current query (semantic search)
-2. Context is injected into your system prompt — typically 200–800 tokens
-3. `mem.ingest()` saves the full conversation exchange asynchronously
-4. Memory persists indefinitely — no TTL, no purge
-
 ## Token savings
 
-Standard approach: full conversation history every turn = 10,000–40,000+ tokens
-With getmem: only relevant context = 200–800 tokens
-**Save up to 95% on context tokens.**
+Saves up to 95% on context tokens by injecting only relevant memories instead of full history.
 
 ## Links
 
 - Website: https://getmem.ai
-- Platform (API keys): https://platform.getmem.ai
+- Documentation: https://getmem.ai/llms-full.txt
 - PyPI: https://pypi.org/project/getmem-ai/
 - npm: https://npmjs.com/package/getmem
-- OpenClaw plugin: https://github.com/getmem-ai/openclaw-getmem
