@@ -2,89 +2,70 @@
  * getmem.ai OpenClaw Plugin
  *
  * Adds persistent memory to every OpenClaw agent session.
- * Memory is stored per-user and injected automatically into
- * the system prompt before each LLM call.
+ * Memory is stored per-user and automatically injected as context
+ * before each LLM call via the message:received hook.
  *
  * Install:
  *   openclaw plugins install clawhub:@getmem/openclaw-getmem
  *   openclaw config set plugins.openclaw-getmem.apiKey gm_live_...
  *   openclaw gateway restart
- *
- * That's it. No code changes required.
  */
 
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { definePluginEntry, buildPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import type { InternalHookEvent } from "openclaw/plugin-sdk/hook-runtime";
+import { z } from "openclaw/plugin-sdk/zod";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Config schema (Zod) ───────────────────────────────────────────────────────
 
-interface GetMemPluginConfig {
-  apiKey: string;
-  baseUrl?: string;
-  enabled?: boolean;
-}
+const ConfigSchema = z.object({
+  apiKey: z.string().min(1, "getmem API key is required"),
+  baseUrl: z.string().url().optional().default("https://memory.getmem.ai"),
+  enabled: z.boolean().optional().default(true),
+});
 
-// Minimal inline client — avoids build-time issues with getmem-ai ESM
-// while keeping the plugin self-contained. Uses the same API surface.
+type GetMemConfig = z.infer<typeof ConfigSchema>;
 
-interface MemoryResult {
+// ── Minimal fetch-based client ────────────────────────────────────────────────
+
+interface MemGetResult {
   context: string;
   memories: Array<{ id: string; text: string; relevance_score: number }>;
-  meta: { total_ms: number; token_count: number };
 }
-
-interface IngestResult {
-  status: string;
-  messages_accepted: number;
-}
-
-// ── Memory client ─────────────────────────────────────────────────────────────
 
 class GetMemClient {
-  private apiKey: string;
-  private baseUrl: string;
+  private readonly apiKey: string;
+  private readonly baseUrl: string;
 
   constructor(apiKey: string, baseUrl = "https://memory.getmem.ai") {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: unknown
-  ): Promise<T> {
+  private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
+      method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({})) as Record<string, unknown>;
-      throw new Error(
-        `getmem API error ${res.status}: ${err["error"] ?? res.statusText}`
-      );
+      const err = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      throw new Error(`getmem ${res.status}: ${String(err["error"] ?? res.statusText)}`);
     }
     return res.json() as Promise<T>;
   }
 
-  async get(userId: string, query: string): Promise<MemoryResult> {
-    return this.request<MemoryResult>("POST", "/v1/memory/get", {
-      user_id: userId,
-      query,
-    });
+  async get(userId: string, query: string): Promise<MemGetResult> {
+    return this.post<MemGetResult>("/v1/memory/get", { user_id: userId, query });
   }
 
-  async ingest(
-    userId: string,
-    userMessage: string,
-    assistantMessage: string
-  ): Promise<IngestResult> {
+  async ingest(userId: string, userMessage: string, assistantMessage: string): Promise<void> {
     const now = new Date().toISOString();
-    return this.request<IngestResult>("POST", "/v1/memory/ingest", {
+    await this.post("/v1/memory/ingest", {
       user_id: userId,
       messages: [
         { role: "user", content: userMessage, timestamp: now },
@@ -92,19 +73,29 @@ class GetMemClient {
       ],
     });
   }
-
-  async health(): Promise<{ status: string }> {
-    return this.request<{ status: string }>("GET", "/v1/health");
-  }
 }
 
-// ── Plugin ────────────────────────────────────────────────────────────────────
+// ── Typed hook contexts ───────────────────────────────────────────────────────
 
-// Per-session state: track last user message so we can ingest after the reply
-const pendingIngests = new Map<
-  string,
-  { userId: string; userMessage: string }
->();
+interface MessageReceivedContext {
+  from: string;
+  content: string;
+  channelId: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface MessageSentContext {
+  to: string;
+  content: string;
+  success: boolean;
+  channelId: string;
+}
+
+// ── Per-session state ─────────────────────────────────────────────────────────
+
+const pending = new Map<string, { userId: string; userMessage: string }>();
+
+// ── Plugin ────────────────────────────────────────────────────────────────────
 
 export default definePluginEntry({
   id: "openclaw-getmem",
@@ -112,103 +103,74 @@ export default definePluginEntry({
   description:
     "Persistent memory for every user via getmem.ai. Remembers users across sessions automatically.",
 
-  register(api) {
-    const config = api.getConfig<GetMemPluginConfig>();
+  configSchema: buildPluginConfigSchema(ConfigSchema),
 
-    if (config.enabled === false) {
-      console.log("[getmem] Memory disabled via config");
-      return;
-    }
+  register(api: OpenClawPluginApi) {
+    const raw = (api.pluginConfig ?? {}) as unknown;
+    const parsed = ConfigSchema.safeParse(raw);
 
-    if (!config.apiKey) {
-      console.warn(
-        "[getmem] No API key configured. Set plugins.openclaw-getmem.apiKey"
+    if (!parsed.success) {
+      api.logger.warn(
+        "[getmem] Invalid config — set plugins.openclaw-getmem.apiKey to your getmem API key"
       );
       return;
     }
 
-    const mem = new GetMemClient(config.apiKey, config.baseUrl);
+    const cfg: GetMemConfig = parsed.data;
 
-    // ── Hook 1: message:preprocessed
-    // Fires after all media/link processing, before the agent sees the message.
-    // We use this to:
-    //   (a) extract the sender ID as user_id
-    //   (b) fetch memory context and append to bodyForAgent
-    api.registerHook(
-      "message:preprocessed",
-      async (event: {
-        type: string;
-        sessionKey: string;
-        context: {
-          bodyForAgent: string;
-          from: string;
-          channelId: string;
-          metadata?: { senderId?: string; senderName?: string };
-        };
-        messages: string[];
-      }) => {
-        const userId =
-          event.context.metadata?.senderId ?? event.context.from ?? "default";
-        const userMessage = event.context.bodyForAgent;
+    if (!cfg.enabled) {
+      api.logger.info("[getmem] Memory disabled via config");
+      return;
+    }
 
-        // Store for post-reply ingest
-        pendingIngests.set(event.sessionKey, { userId, userMessage });
+    const mem = new GetMemClient(cfg.apiKey, cfg.baseUrl);
 
-        // Fetch relevant memory
-        try {
-          const result = await mem.get(userId, userMessage);
-          if (result.context && result.context.trim()) {
-            // Append memory context to the body the agent receives
-            event.context.bodyForAgent =
-              `${userMessage}\n\n` +
-              `[Memory context for ${userId}]\n${result.context}`;
-          }
-        } catch (err) {
-          // Never block the agent — memory is best-effort
-          console.warn(
-            `[getmem] Failed to fetch memory for ${userId}:`,
-            (err as Error).message
-          );
+    // ── Hook 1: message:received
+    // Fires when an inbound message arrives from any channel.
+    // Fetch memory for the sender and push as context for the agent.
+    api.registerHook("message:received", async (event: InternalHookEvent) => {
+      const ctx = event.context as unknown as MessageReceivedContext;
+      const userId =
+        typeof ctx.metadata?.["senderId"] === "string"
+          ? ctx.metadata["senderId"]
+          : ctx.from;
+      const userMessage = ctx.content;
+
+      // Store for post-reply ingest
+      pending.set(event.sessionKey, { userId, userMessage });
+
+      try {
+        const result = await mem.get(userId, userMessage);
+        if (result.context?.trim()) {
+          event.messages.push(`[Memory]\n${result.context}`);
         }
+      } catch (err) {
+        api.logger.warn(
+          `[getmem] Memory fetch failed for ${userId}: ${(err as Error).message}`
+        );
       }
-    );
+    });
 
     // ── Hook 2: message:sent
     // Fires after the agent's reply is delivered.
-    // We ingest the user + assistant exchange into memory.
-    api.registerHook(
-      "message:sent",
-      async (event: {
-        type: string;
-        sessionKey: string;
-        context: {
-          to: string;
-          content: string;
-          success: boolean;
-          channelId: string;
-        };
-        messages: string[];
-      }) => {
-        if (!event.context.success) return;
+    // Ingest the exchange — fire-and-forget, never blocks the reply pipeline.
+    api.registerHook("message:sent", async (event: InternalHookEvent) => {
+      const ctx = event.context as unknown as MessageSentContext;
+      if (!ctx.success) return;
 
-        const pending = pendingIngests.get(event.sessionKey);
-        if (!pending) return;
+      const state = pending.get(event.sessionKey);
+      if (!state) return;
+      pending.delete(event.sessionKey);
 
-        pendingIngests.delete(event.sessionKey);
-
-        const { userId, userMessage } = pending;
-        const reply = event.context.content;
-
-        // Fire-and-forget — never block the reply pipeline
-        void mem.ingest(userId, userMessage, reply).catch((err: Error) => {
-          console.warn(
-            `[getmem] Failed to ingest for ${userId}:`,
-            err.message
+      void mem.ingest(state.userId, state.userMessage, ctx.content).catch(
+        (err: Error) => {
+          api.logger.warn(
+            `[getmem] Ingest failed for ${state.userId}: ${err.message}`
           );
-        });
-      }
-    );
+        }
+      );
+    });
 
-    console.log("[getmem] Memory plugin active — getmem.ai");
+    api.logger.info("[getmem] Memory active — getmem.ai");
   },
 });
