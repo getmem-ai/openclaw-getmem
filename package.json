@@ -6,7 +6,9 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "openclaw": {
-    "extensions": ["./src/index.ts"],
+    "extensions": [
+      "./src/index.ts"
+    ],
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2",
       "minGatewayVersion": "2026.3.24-beta.2"
@@ -21,12 +23,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "getmem-ai": "^0.1.1"
+    "getmem-ai": "^0.0.1"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
   },
-  "keywords": ["openclaw", "memory", "getmem", "ai", "agent"],
+  "keywords": [
+    "openclaw",
+    "memory",
+    "getmem",
+    "ai",
+    "agent"
+  ],
   "author": "getmem.ai",
   "license": "MIT",
   "repository": {

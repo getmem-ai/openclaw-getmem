@@ -1,70 +1,80 @@
-# @getmem/openclaw-getmem
+# getmem.ai Memory Plugin for OpenClaw
 
-Persistent memory for OpenClaw agents via [getmem.ai](https://getmem.ai).
-
-Every user is remembered across sessions, conversations, and gateway restarts — automatically.
+Persistent memory for every user via [getmem.ai](https://getmem.ai). Automatically ingests conversations and injects relevant context before each agent reply.
 
 ## Install
 
 ```bash
-# 1. Install the plugin
 openclaw plugins install clawhub:@getmem/openclaw-getmem
-
-# 2. Set your API key
 openclaw config set plugins.openclaw-getmem.apiKey gm_live_...
-
-# 3. Restart the gateway
 openclaw gateway restart
 ```
 
-Get your API key at [platform.getmem.ai](https://platform.getmem.ai)
+Get your API key at [platform.getmem.ai](https://platform.getmem.ai) — **$20 free credit on signup, $10/month added automatically**.
 
 ## How it works
 
-The plugin hooks into two points in the OpenClaw message pipeline:
+On every inbound message:
+1. **Fetch** — calls `GET /v1/memory/get` with the sender's user ID and message as query
+2. **Inject** — appends retrieved memory context to the agent's prompt
+3. **Ingest** — after the agent replies, calls `POST /v1/memory/ingest` with the full exchange (fire-and-forget)
 
-1. **Before each LLM call** — fetches relevant memory for the user and appends it to the message context automatically
-2. **After each reply** — saves the conversation exchange to memory in the background (non-blocking)
+Memory accumulates over time. The more you use it, the richer the context becomes.
 
-No code changes required. Works with all channels (Telegram, Discord, Signal, WhatsApp, etc.)
-
-## Configuration
+## Config options
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `apiKey` | ✅ | — | Your getmem.ai API key (`gm_live_...`) |
-| `baseUrl` | — | `https://memory.getmem.ai` | Custom API endpoint |
-| `enabled` | — | `true` | Disable memory without uninstalling |
+| `baseUrl` | ❌ | `https://memory.getmem.ai` | API base URL |
+| `enabled` | ❌ | `true` | Enable/disable memory |
 
-Set config values:
-```bash
-openclaw config set plugins.openclaw-getmem.apiKey gm_live_...
-openclaw config set plugins.openclaw-getmem.enabled false  # to disable
+## Verify it's working
+
+After restart, check your gateway logs:
+
+```
+[getmem] Hooks registered: message:received ✓  message:sent ✓
+[getmem] Memory active — getmem.ai
 ```
 
-## What gets remembered
+If you see `Memory active` but **not** the hooks line, the hooks failed to register. See troubleshooting below.
 
-- User preferences and choices
-- Facts about the user's context
-- Past decisions and goals
-- Relationships and constraints
-- Anything mentioned across previous conversations
+On the first message after install, you should see:
+```
+[getmem] message_received fired — session:... action:received
+```
 
-Memory is scoped per user (by sender ID) and retrieved using semantic search — only relevant context is injected, not everything at once.
+## Troubleshooting
 
-## Token efficiency
+### "hook registration missing name" in logs
+This is an OpenClaw internal warning when a plugin registers a hook without a `name` option. This plugin includes the required `{ name: "..." }` option — if you see this error, you may be running an old version. Reinstall:
+```bash
+openclaw plugins uninstall openclaw-getmem
+openclaw plugins install clawhub:@getmem/openclaw-getmem
+```
 
-Standard approach: entire conversation history sent every turn (10,000–40,000+ tokens).
+### Hooks not firing (no "message_received fired" in logs)
+Ensure the plugin loaded with both hooks confirmed in startup logs. If only "Memory active" appears without the hooks line, the gateway may have loaded a cached version. Try:
+```bash
+openclaw gateway restart
+```
 
-With getmem: only relevant memory injected (200–800 tokens). **Save up to 95% on context tokens.**
+### Memory not accumulating
+Check that `message:sent` hook is firing after replies. If ingest calls fail, you'll see:
+```
+[getmem] ingest failed: ...
+```
+
+### API key errors
+Verify your key starts with `gm_live_` and is set correctly:
+```bash
+openclaw config get plugins.openclaw-getmem.apiKey
+```
 
 ## Links
 
-- Website: [getmem.ai](https://getmem.ai)
-- Platform (API keys): [platform.getmem.ai](https://platform.getmem.ai)
-- Python SDK: [pypi.org/project/getmem-ai](https://pypi.org/project/getmem-ai/)
-- JavaScript SDK: [npmjs.com/package/getmem](https://npmjs.com/package/getmem)
-
-## License
-
-MIT
+- [getmem.ai](https://getmem.ai) — landing page
+- [platform.getmem.ai](https://platform.getmem.ai) — dashboard & API keys
+- [API docs](https://getmem.ai/llms-full.txt) — full API reference
+- [GitHub](https://github.com/getmem-ai) — source code

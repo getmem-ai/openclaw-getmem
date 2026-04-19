@@ -1,5 +1,5 @@
 {
-  "id": "openclaw-getmem",
+  "id": "getmem-openclaw",
   "name": "getmem.ai Memory",
   "description": "Persistent memory for every user via getmem.ai. Automatically remembers users across sessions.",
   "version": "1.0.0",
@@ -22,6 +22,11 @@
         "default": true
       }
     },
-    "required": ["apiKey"]
-  }
+    "required": [
+      "apiKey"
+    ]
+  },
+  "extensions": [
+    "./dist/index.js"
+  ]
 }
